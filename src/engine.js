@@ -84,7 +84,8 @@ const Crux = (() => {
     LEFT_HAND: 'Left hand opened',
     RIGHT_HAND: 'Right hand opened',
     LET_GO: 'Let go',
-    MISSED_DYNO: 'Missed the jump'
+    MISSED_DYNO: 'Missed the jump',
+    TIDE: 'Washed off'
   };
 
   const hypot = Math.hypot;
@@ -140,13 +141,25 @@ const Crux = (() => {
       this.launchHolds = new Set();
       this.wasUnbalanced = false;
       this.dynoCatches = 0;
-      prob.start.forEach((h, i) => this.place(i, h));
+      this.tide = this.kit.tide || null;
+      this.tideY = this.tide ? this.tide.start : Infinity;
+      this.tideRunning = false;
+      this.tideGap = Infinity;
+      prob.start.forEach((h, i) => {
+        if (h !== null) this.place(i, h);
+      });
       const t = this.targetPose();
       this.body.sx = t[0];
       this.body.sy = t[1];
       this.body.px = t[2];
       this.body.py = t[3];
-      this.line.push(prob.start[0], prob.start[1]);
+      for (const s of this.limbs) {
+        if (s.hold !== null) continue;
+        const a = this.anchor(s.limb.id);
+        s.x = a[0] + s.limb.side * (s.limb.hand ? 8 : 5);
+        s.y = a[1] + (s.limb.hand ? 72 : 86);
+      }
+      for (const h of [prob.start[0], prob.start[1]]) if (h !== null) this.line.push(h);
       this.camera = this.clampCamera(this.body.py - this.viewHeight * K.CAM_ANCHOR);
       this.high = prob.ground - this.body.py;
     }
@@ -178,7 +191,10 @@ const Crux = (() => {
 
     heldBy(index) { return this.limbs.some((s) => s.hold === index); }
 
+    isSubmerged(index) { return this.holds[index].y > this.tideY - 4; }
+
     canGrab(limb, index) {
+      if (this.isSubmerged(index)) return false;
       const hold = this.holds[index];
       const hand = LIMBS[limb].hand;
       if (!hand && hold.y < this.body.py - K.FOOT_HIGH_STEP) return false;
@@ -357,7 +373,8 @@ const Crux = (() => {
       this.time += dt;
       if (this.coachHold > 0) this.coachHold -= dt;
       if (this.phase === 'CLIMB') {
-        this.updateBody(dt);
+        this.updateTide(dt);
+        if (this.phase === 'CLIMB') this.updateBody(dt);
         if (this.phase === 'CLIMB') this.updateGrip(dt);
       } else if (this.phase === 'DYNO') {
         this.updateDyno(dt);
@@ -367,6 +384,25 @@ const Crux = (() => {
       if (this.phase === 'CLIMB' || this.phase === 'DYNO') this.high = Math.max(this.high, this.problem.ground - this.body.py);
       const target = this.clampCamera(this.body.py - this.viewHeight * K.CAM_ANCHOR);
       this.camera += (target - this.camera) * ease(K.CAM_LERP, dt);
+    }
+
+    updateTide(dt) {
+      const tide = this.tide;
+      if (!tide) return;
+      this.tideGap = this.tideY - this.body.py;
+      if (!this.tideRunning) return;
+      const scale = clamp((this.tideGap - tide.near) / (tide.cruise - tide.near), tide.min, tide.max);
+      this.tideY -= tide.rate * scale * dt;
+      for (const s of this.limbs) {
+        if (s.hold === null || !this.isSubmerged(s.hold)) continue;
+        s.hold = null;
+        this.cues.push(s.limb.hand ? 'SLIP' : 'FOOT_OFF');
+        this.cues.push('TIDE');
+      }
+      if (this.body.py > this.tideY + 6) {
+        this.cause = 'TIDE';
+        this.startFall();
+      }
     }
 
     clampCamera(v) {
@@ -561,7 +597,7 @@ const Crux = (() => {
       let best = -1;
       let bestDistance = K.DYNO_GRAB;
       for (let i = 0; i < this.holds.length; i++) {
-        if (this.launchHolds.has(i)) continue;
+        if (this.launchHolds.has(i) || this.isSubmerged(i)) continue;
         const d = hypot(this.holds[i].x - cx, this.holds[i].y - cy);
         if (d < bestDistance) {
           bestDistance = d;
@@ -601,7 +637,7 @@ const Crux = (() => {
       this.body.sy += my;
       this.body.py += my;
       for (const s of this.limbs) s.y += my;
-      if (this.body.py > this.problem.ground - 40) {
+      if (this.body.py > Math.min(this.problem.ground - 40, this.tideY + 30)) {
         this.phase = 'FELL';
         this.cues.push('LANDED');
       }

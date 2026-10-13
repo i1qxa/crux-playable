@@ -20,11 +20,17 @@
     held: '#D6EBFF',
     mat: '#DDE3E9'
   };
+  const LOOKS = {
+    tide: { bg: '#E9EDF0', contour: '#A9CBE6', seam: '#8DB4D6', rule: '#CFD6DD' },
+    race: { bg: INK.wall, contour: INK.contour, seam: INK.seam, rule: INK.rule }
+  };
   const TAPES = ['#C8683F', '#5980A6', '#7A8A5E', '#8C5E7A', '#2C455D', '#B0703A'];
   const STORE_URL = 'https://play.google.com/store/apps/details?id=com.kavri.sulden.crux';
-  const ASSIST_DELAY = 2.2;
+  const ASSIST_DELAY = 0.9;
+  const TIDE_AUTOSTART = 2.2;
   const COND = '"Barlow Condensed", "Arial Narrow", sans-serif';
   const BODY = 'Barlow, "Helvetica Neue", Arial, sans-serif';
+  const PITCH = '40 problems across 5 crags. Tide, crumbling rock and night climbs.';
 
   const HOLD_SHAPES = {
     JUG: new Path2D('M-19 6C-15 -12 13 -13 19 1C23 9 14 14 0 14C-16 14 -24 12 -19 6Z'),
@@ -41,22 +47,30 @@
 
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
-  const demo = /demo/.test(location.hash);
+  const hash = location.hash;
+  const demo = /demo/.test(hash);
+  const MODE = /race/.test(hash) ? 'race' : /tide/.test(hash) ? 'tide' : (document.body.dataset.mode === 'race' ? 'race' : 'tide');
+  const PROB = MODE === 'tide' ? TIDE_ROUTE : ROUTE;
+  const PROB_KIT = MODE === 'tide' ? TIDE_KIT : KIT;
+  const LOOK = LOOKS[MODE];
   const spacingSupported = 'letterSpacing' in ctx;
+  const ART = loadArt();
 
   let W = 0, H = 0, DPR = 1, L = null;
-  let engine, assist, spotter;
+  let engine, assist, spotter, rival;
   let attempt = 1;
   let bestHigh = 0;
   let state = 'play';
   let endTimer = 0;
   let endCard = null;
   let idle = 0;
-  let firstMove = true;
+  let touched = false;
+  let grabs = 0;
   let hint = null;
   let hintClock = 0;
   let hintRefresh = 0;
   let flashes = [];
+  let popups = [];
   let confetti = [];
   let buttons = [];
   let pressedButton = null;
@@ -66,6 +80,15 @@
   let paused = false;
   let lastFrame = 0;
   let clock = 0;
+  let playClock = 0;
+  let shake = 0;
+  let combo = 0;
+  let lastGrab = -9;
+  let meterMark = 0;
+  let danger = false;
+  let closest = Infinity;
+  let midCta = null;
+  let midCtaShown = false;
   let audio = null;
   let master = null;
   let musicGain = null;
@@ -76,11 +99,35 @@
   const MUSIC_DUCK = 0.16;
   const sfxBuffers = {};
 
+  function loadArt() {
+    const out = {};
+    const node = document.getElementById('art');
+    if (!node) return out;
+    let data;
+    try {
+      data = JSON.parse(node.textContent);
+    } catch (err) {
+      return out;
+    }
+    for (const [name, src] of Object.entries(data)) {
+      const img = new Image();
+      img.src = src;
+      out[name] = img;
+    }
+    return out;
+  }
+
+  function artReady(name) {
+    const img = ART[name];
+    return img && img.complete && img.naturalWidth > 0 ? img : null;
+  }
+
   function newAttempt() {
-    engine = new Crux.Engine(ROUTE, KIT, L ? L.viewH : 560);
+    if (state === 'end') setMusicLevel(MUSIC_LEVEL, 0.8);
+    engine = new Crux.Engine(PROB, PROB_KIT, L ? L.viewH : 560);
     assist = new FootAssist(engine, ASSIST_DELAY);
     spotter = demo ? new Crux.Spotter(engine, 0.9, 0.05, attempt) : null;
-    if (state === 'end') setMusicLevel(MUSIC_LEVEL, 0.8);
+    rival = MODE === 'race' ? new Rival(ROUTE, 7 + attempt) : null;
     state = 'play';
     endTimer = 0;
     endCard = null;
@@ -88,7 +135,16 @@
     hint = null;
     hintClock = 0;
     flashes = [];
+    popups = [];
     confetti = [];
+    playClock = 0;
+    combo = 0;
+    lastGrab = -9;
+    meterMark = Math.floor(engine.high / 100);
+    danger = false;
+    closest = Infinity;
+    midCta = null;
+    if (touched || demo) engine.tideRunning = true;
     document.body.dataset.phase = 'play';
   }
 
@@ -105,7 +161,7 @@
     if (portrait) {
       u = Math.max(0.75, Math.min(1.5, W / 390));
       const top = 56 * u;
-      const bottom = 156 * u;
+      const bottom = 92 * u;
       wall = { x: 0, y: top, w: W, h: H - top - bottom };
       panel = { x: 0, y: H - bottom, w: W, h: bottom };
     } else {
@@ -118,6 +174,7 @@
     const worldW = wall.w / s;
     L = { portrait, u, wall, panel, side, s, worldLeft: 180 - worldW / 2, worldW, viewH: wall.h / s };
     if (engine) engine.setViewHeight(L.viewH);
+    if (rival) rival.engine.setViewHeight(L.viewH);
   }
 
   function setFont(size, weight, family) {
@@ -134,6 +191,12 @@
     ctx.fillStyle = o.color || INK.text;
     ctx.textAlign = o.align || 'left';
     ctx.textBaseline = o.baseline || 'alphabetic';
+    if (o.stroke) {
+      ctx.lineWidth = o.strokeWidth || o.size * 0.18;
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = o.stroke;
+      ctx.strokeText(str, x, y);
+    }
     ctx.fillText(str, x, y);
     spacing(0);
   }
@@ -194,12 +257,13 @@
     if (style.fill) {
       rect(x, y, w, h, pressed ? INK.night : style.fill);
       if (pulse) {
+        ctx.save();
         ctx.strokeStyle = style.fill;
-        ctx.globalAlpha = 0.5 * (1 - pulse);
+        ctx.globalAlpha *= 0.5 * (1 - pulse);
         ctx.lineWidth = 2;
         const g = 3 + pulse * 6 * L.u;
         ctx.strokeRect(x - g, y - g, w + g * 2, h + g * 2);
-        ctx.globalAlpha = 1;
+        ctx.restore();
       }
     } else {
       rect(x, y, w, h, pressed ? '#E7E7EA' : INK.paper, style.border || INK.navy, 1);
@@ -229,6 +293,11 @@
     return p.x >= w.x && p.x <= w.x + w.w && p.y >= w.y && p.y <= w.y + w.h;
   }
 
+  function progressOf(e) {
+    const span = e.problem.ground - e.problem.holds[e.problem.top].y - 110;
+    return Math.max(0, Math.min(1, (e.high - 110) / span));
+  }
+
   function ik(rx, ry, ex, ey, l1, l2, bend) {
     let dx = ex - rx, dy = ey - ry;
     let d = Math.hypot(dx, dy);
@@ -245,22 +314,32 @@
     return [rx + Math.cos(base) * l1, ry + Math.sin(base) * l1, rx + dx, ry + dy];
   }
 
-  function drawHold(h, held) {
+  function drawHold(h, held, glow) {
     ctx.save();
     ctx.translate(h.x, h.y);
+    if (glow) {
+      const pulse = 0.5 + 0.5 * Math.sin(clock * 7);
+      ctx.beginPath();
+      ctx.arc(0, 2, 24 + pulse * 4, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(200,104,63,${0.16 + pulse * 0.14})`;
+      ctx.fill();
+    }
     ctx.fillStyle = held ? INK.held : INK.paper;
     ctx.fill(HOLD_SHAPES[h.kind]);
-    ctx.strokeStyle = INK.navy;
-    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = glow ? INK.tape : INK.navy;
+    ctx.lineWidth = glow ? 2.4 : 1.6;
     ctx.stroke(HOLD_SHAPES[h.kind]);
-    ctx.strokeStyle = INK.seam;
+    ctx.strokeStyle = LOOK.seam;
     ctx.lineWidth = 1;
     ctx.stroke(HOLD_HATCH[h.kind]);
     ctx.restore();
   }
 
-  function drawClimber(e) {
+  function drawClimber(e, ghost) {
     const b = e.body;
+    const K = Crux.K;
+    const torsoFill = ghost ? INK.tape : INK.accentDeep;
+    const lineInk = ghost ? '#8A4426' : INK.night;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     const limb = (id, l1, l2, bend) => {
@@ -270,7 +349,7 @@
       let seg = Math.max(l1 * 0.45, Math.min(l1, reach * 0.6));
       if (seg * 2 < reach + 1) seg = reach / 2 + 1;
       const j = ik(a[0], a[1], s.x, s.y, seg, seg * (l2 / l1), bend);
-      ctx.strokeStyle = INK.night;
+      ctx.strokeStyle = lineInk;
       ctx.lineWidth = 7;
       ctx.beginPath();
       ctx.moveTo(a[0], a[1]);
@@ -278,7 +357,6 @@
       ctx.lineTo(j[2], j[3]);
       ctx.stroke();
     };
-    const K = Crux.K;
     limb(Crux.LF, K.THIGH, K.SHIN, 1);
     limb(Crux.RF, K.THIGH, K.SHIN, -1);
     limb(Crux.LH, K.UPPER_ARM, K.FOREARM, -1);
@@ -294,23 +372,26 @@
     ctx.lineTo(b.px + nx * hh, b.py + ny * hh);
     ctx.lineTo(b.px - nx * hh, b.py - ny * hh);
     ctx.closePath();
-    ctx.fillStyle = INK.accentDeep;
+    ctx.fillStyle = torsoFill;
     ctx.fill();
-    ctx.strokeStyle = INK.night;
+    ctx.strokeStyle = lineInk;
     ctx.lineWidth = 2;
     ctx.stroke();
-    const k = 0.3;
-    ctx.strokeStyle = INK.contour;
-    ctx.beginPath();
-    ctx.moveTo(b.sx - nx * (sh - 2) + ax * k, b.sy - ny * (sh - 2) + ay * k);
-    ctx.lineTo(b.sx + nx * (sh - 2) + ax * k, b.sy + ny * (sh - 2) + ay * k);
-    ctx.stroke();
+    if (!ghost) {
+      const k = 0.3;
+      ctx.strokeStyle = INK.contour;
+      ctx.beginPath();
+      ctx.moveTo(b.sx - nx * (sh - 2) + ax * k, b.sy - ny * (sh - 2) + ay * k);
+      ctx.lineTo(b.sx + nx * (sh - 2) + ax * k, b.sy + ny * (sh - 2) + ay * k);
+      ctx.stroke();
+    }
     ctx.beginPath();
     ctx.arc(e.headX, e.headY, 13, 0, Math.PI * 2);
-    ctx.fillStyle = INK.navy;
+    ctx.fillStyle = ghost ? '#B0573A' : INK.navy;
     ctx.fill();
-    ctx.strokeStyle = INK.night;
+    ctx.strokeStyle = lineInk;
     ctx.stroke();
+    if (ghost) return;
     const bx = b.px - nx * 15 + (ax / len) * 18, by = b.py - ny * 15 + (ay / len) * 18;
     ctx.beginPath();
     ctx.arc(bx, by, 6, 0, Math.PI * 2);
@@ -347,6 +428,47 @@
     }
   }
 
+  function drawWater(e, left, right, bottom) {
+    const t = e.tideY;
+    if (!isFinite(t) || t > bottom + 40) return;
+    const wave = (x, phase, amp) => t + Math.sin(x / 22 + clock * 2.4 + phase) * amp + Math.sin(x / 9 - clock * 3.1) * 1.2;
+    ctx.beginPath();
+    ctx.moveTo(left, wave(left, 0, 3));
+    for (let x = left; x <= right; x += 8) ctx.lineTo(x, wave(x, 0, 3));
+    ctx.lineTo(right, bottom + 200);
+    ctx.lineTo(left, bottom + 200);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0, t, 0, t + 260);
+    g.addColorStop(0, 'rgba(89,128,166,0.50)');
+    g.addColorStop(1, 'rgba(44,69,93,0.82)');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    for (let x = left; x <= right; x += 8) {
+      const y = wave(x, 0, 3);
+      if (x === left) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let x = left; x <= right; x += 8) {
+      const y = wave(x, 1.7, 2.4) + 12;
+      if (x === left) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    for (let i = 0; i < 14; i++) {
+      const bx = left + ((i * 53.3 + clock * 9 * (i % 3 + 1)) % (right - left));
+      const by = t + 20 + ((i * 37.1 - clock * 22 * (i % 2 + 1)) % 200 + 200) % 200;
+      ctx.beginPath();
+      ctx.arc(bx, by, 1.4 + (i % 3) * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   function drawWall() {
     const e = engine;
     const p = e.problem;
@@ -355,15 +477,15 @@
     ctx.beginPath();
     ctx.rect(wl.x, wl.y, wl.w, wl.h);
     ctx.clip();
-    ctx.fillStyle = INK.wall;
+    ctx.fillStyle = LOOK.bg;
     ctx.fillRect(wl.x, wl.y, wl.w, wl.h);
-    ctx.setTransform(DPR * L.s, 0, 0, DPR * L.s, DPR * (wl.x - L.worldLeft * L.s), DPR * (wl.y - e.camera * L.s));
+    ctx.setTransform(DPR * L.s, 0, 0, DPR * L.s, DPR * (wl.x - L.worldLeft * L.s + shakeX()), DPR * (wl.y - e.camera * L.s + shakeY()));
     const top = e.camera - 40;
     const bottom = e.camera + L.viewH + 40;
     const left = L.worldLeft - 12;
     const right = L.worldLeft + L.worldW + 12;
 
-    ctx.strokeStyle = INK.contour;
+    ctx.strokeStyle = LOOK.contour;
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let y = Math.floor(top / 52) * 52; y < bottom; y += 52) {
@@ -373,7 +495,7 @@
       }
     }
     ctx.stroke();
-    ctx.strokeStyle = INK.seam;
+    ctx.strokeStyle = LOOK.seam;
     ctx.beginPath();
     for (const x0 of [104, 262]) {
       for (let yy = top, first = true; yy < bottom; yy += 14, first = false) {
@@ -383,18 +505,21 @@
     }
     ctx.stroke();
 
-    const matL = L.worldLeft + 28, matW = L.worldW - 56;
-    ctx.fillStyle = INK.mat;
-    ctx.fillRect(matL, p.ground, matW, 22);
-    ctx.strokeStyle = INK.navy;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(matL, p.ground, matW, 22);
+    if (MODE === 'race') {
+      const matL = L.worldLeft + 28, matW = L.worldW - 56;
+      ctx.fillStyle = INK.mat;
+      ctx.fillRect(matL, p.ground, matW, 22);
+      ctx.strokeStyle = INK.navy;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(matL, p.ground, matW, 22);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(left, p.ground);
+      ctx.lineTo(right, p.ground);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = LOOK.rule;
     ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(left, p.ground);
-    ctx.lineTo(right, p.ground);
-    ctx.stroke();
-    ctx.strokeStyle = INK.rule;
     ctx.beginPath();
     for (let m = p.ground - 100; m > p.wallTop; m -= 100) {
       ctx.moveTo(L.worldLeft, m);
@@ -406,7 +531,7 @@
       const a = e.anchor(e.drag.limb);
       const r = e.reachOf(e.drag.limb);
       ctx.setLineDash([4, 4]);
-      ctx.strokeStyle = INK.seam;
+      ctx.strokeStyle = LOOK.seam;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.arc(a[0], a[1], r, 0, Math.PI * 2);
@@ -421,9 +546,10 @@
       ctx.setLineDash([]);
     }
 
+    const glowHold = hint && hint.kind === 'move' && state === 'play' ? hint.hold : -1;
     p.holds.forEach((h, i) => {
       if (h.y < top - 30 || h.y > bottom + 30) return;
-      drawHold(h, e.heldBy(i));
+      drawHold(h, e.heldBy(i), i === glowHold);
       ctx.fillStyle = i === p.top ? INK.night : p.tape;
       ctx.fillRect(h.x - 9, h.y + 16, 18, 3.5);
     });
@@ -439,7 +565,12 @@
       ctx.globalAlpha = 1;
     }
 
-    drawClimber(e);
+    if (rival) {
+      ctx.globalAlpha = 0.5;
+      drawClimber(rival.engine, true);
+      ctx.globalAlpha = 1;
+    }
+    drawClimber(e, false);
 
     if (e.aim) {
       const dx = e.aim.x0 - e.aim.x, dy = e.aim.y0 - e.aim.y;
@@ -459,7 +590,9 @@
       ctx.setLineDash([]);
     }
 
+    if (MODE === 'tide') drawWater(e, left, right, bottom);
     if (hint && state === 'play') drawHintWorld();
+    drawPopupsWorld();
 
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     for (let m = p.ground - 100; m > p.wallTop; m -= 100) {
@@ -468,78 +601,161 @@
     }
     const topHold = p.holds[p.top];
     const tp = toScreen(topHold.x + 24, topHold.y + 4);
-    text('TOP', tp.x, tp.y, { size: 10 * L.s, color: INK.navy, spacing: 0.06 });
+    text('TOP', tp.x, tp.y, { size: 11 * L.s, weight: 700, color: INK.navy, spacing: 0.06 });
     if (!e.bonus) {
       const bh = p.holds[p.bonus];
       const bp = toScreen(bh.x + 24, bh.y + 4);
       text('BONUS', bp.x, bp.y, { size: 10 * L.s, color: INK.tape, spacing: 0.06 });
     }
-    drawCoach();
+    if (rival) {
+      const r = rival.engine;
+      const rp = toScreen(r.headX, r.headY - 22);
+      const o = { size: 10 * L.u, weight: 700, spacing: 0.1, color: INK.paper };
+      const tw = measure(RIVAL.name, o) + 10 * L.u;
+      rect(rp.x - tw / 2, rp.y - 13 * L.u, tw, 16 * L.u, INK.tape);
+      text(RIVAL.name, rp.x, rp.y - 1 * L.u, Object.assign({ align: 'center' }, o));
+    }
+    drawDanger();
+    drawProgressRail();
+    drawHook();
     if (hint && state === 'play') drawHintCaption();
+    drawMidCta();
     ctx.restore();
     muteButton();
   }
 
-  function drawCoach() {
-    if (state !== 'play' || engine.phase === 'FALL') return;
+  function shakeX() {
+    return shake > 0 ? Math.sin(clock * 90) * shake * 10 * L.u : 0;
+  }
+
+  function shakeY() {
+    return shake > 0 ? Math.cos(clock * 77) * shake * 6 * L.u : 0;
+  }
+
+  function drawDanger() {
+    if (MODE !== 'tide' || state !== 'play' || engine.phase !== 'CLIMB' || !engine.tideRunning) return;
+    const gap = engine.tideGap;
+    if (gap > 80) return;
+    const k = Math.min(1, (80 - gap) / 50);
+    const pulse = 0.6 + 0.4 * Math.sin(clock * 9);
+    const wl = L.wall;
+    const g = ctx.createLinearGradient(0, wl.y + wl.h, 0, wl.y + wl.h * 0.55);
+    g.addColorStop(0, `rgba(200,104,63,${0.38 * k * pulse})`);
+    g.addColorStop(1, 'rgba(200,104,63,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(wl.x, wl.y + wl.h * 0.55, wl.w, wl.h * 0.45);
+  }
+
+  function drawProgressRail() {
     const u = L.u;
-    const line = engine.coach.toUpperCase();
-    const o = { size: 13 * u, weight: 500, spacing: 0.06, color: INK.text };
-    const maxW = L.wall.w - 24 * u - 46 * u;
-    const lines = wrap(line, maxW - 18 * u, o);
-    const w = Math.min(maxW, Math.max(...lines.map((l) => measure(l, o))) + 18 * u);
-    const lh = 16 * u;
-    const h = lines.length * lh + 10 * u;
-    const x = L.wall.x + 12 * u, y = L.wall.y + 12 * u;
-    rect(x, y, w, h, INK.paper, INK.frame, 1);
-    lines.forEach((l, i) => text(l, x + 9 * u, y + 5 * u + lh * (i + 0.78), o));
+    const wl = L.wall;
+    const x = wl.x + wl.w - 14 * u;
+    const y0 = wl.y + 62 * u, y1 = wl.y + wl.h - 70 * u;
+    if (y1 - y0 < 60 * u) return;
+    rect(x - 2 * u, y0, 4 * u, y1 - y0, 'rgba(44,69,93,0.18)');
+    const py = y1 - (y1 - y0) * progressOf(engine);
+    rect(x - 2 * u, py, 4 * u, y1 - py, INK.accent);
+    rect(x - 1 * u, y0 - 18 * u, 2 * u, 18 * u, INK.night);
+    ctx.fillStyle = INK.tape;
+    ctx.beginPath();
+    ctx.moveTo(x + 1 * u, y0 - 18 * u);
+    ctx.lineTo(x + 12 * u, y0 - 13 * u);
+    ctx.lineTo(x + 1 * u, y0 - 8 * u);
+    ctx.closePath();
+    ctx.fill();
+    if (rival) {
+      const ry = y1 - (y1 - y0) * progressOf(rival.engine);
+      ctx.fillStyle = INK.tape;
+      ctx.beginPath();
+      ctx.arc(x, ry, 6 * u, 0, Math.PI * 2);
+      ctx.fill();
+      text('M', x, ry + 0.5 * u, { size: 8 * u, weight: 700, color: INK.paper, align: 'center', baseline: 'middle' });
+    }
+    ctx.fillStyle = INK.navy;
+    ctx.beginPath();
+    ctx.arc(x, py, 7 * u, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = INK.paper;
+    ctx.lineWidth = 2 * u;
+    ctx.stroke();
+  }
+
+  function drawHook() {
+    if (state !== 'play') return;
+    const u = L.u;
+    const wl = L.wall;
+    const cx = wl.x + wl.w / 2;
+    if (MODE === 'tide' && grabs === 0 && playClock < 6) {
+      const pop = Math.min(1, playClock / 0.25);
+      const wob = Math.sin(clock * 18) * 3 * u * (grabs === 0 ? 1 : 0);
+      const size = 40 * u * (0.7 + 0.3 * pop);
+      const y = wl.y + wl.h * 0.2;
+      text("HE'S SLIPPING!", cx + wob, y, { size, weight: 700, color: INK.tape, align: 'center', stroke: INK.paper, strokeWidth: 7 * u, spacing: 0.02 });
+      text('THE TIDE IS COMING IN', cx, y + 24 * u, { size: 14 * u, weight: 700, color: INK.navy, align: 'center', stroke: INK.paper, strokeWidth: 5 * u, spacing: 0.12 });
+    }
+    if (MODE === 'race' && playClock < 2.4) {
+      const t = playClock;
+      const label = t < 1.5 ? `BEAT ${RIVAL.name} TO THE TOP!` : 'GO!';
+      const size = (t < 1.5 ? 32 : 64) * u * (t < 1.5 ? 1 : 1 + (2.4 - t) * 0.25);
+      text(label, cx, wl.y + wl.h * 0.22, { size, weight: 700, color: t < 1.5 ? INK.navy : INK.tape, align: 'center', stroke: INK.paper, strokeWidth: 7 * u });
+    }
+  }
+
+  function handHint() {
+    const e = engine;
+    const s = assist.spotter;
+    const top = e.problem.top;
+    const lh = e.limbs[Crux.LH], rh = e.limbs[Crux.RH];
+    if (e.chalk > 0 && e.hands().some((h) => h.hold !== null && h.grip < 0.3)) return { kind: 'chalk' };
+    if ((lh.hold === top) !== (rh.hold === top)) {
+      const other = lh.hold === top ? Crux.RH : Crux.LH;
+      if (e.canGrab(other, top) && e.inReach(other, top, 4)) return { kind: 'move', limb: other, hold: top };
+    }
+    for (const hand of [Crux.LH, Crux.RH]) {
+      if (e.limbs[hand].hold !== null) continue;
+      const pick = s.bestHand(hand, true);
+      if (pick !== null) return { kind: 'move', limb: hand, hold: pick };
+    }
+    for (const hand of [lh, rh].sort((a, b) => b.y - a.y)) {
+      const pick = s.bestHand(hand.limb.id, false);
+      if (pick !== null) return { kind: 'move', limb: hand.limb.id, hold: pick };
+    }
+    return null;
   }
 
   function hintCopy(h) {
-    if (h.kind === 'chalk') return 'PUMPED! TAP CHALK';
-    if (h.kind === 'dyno') return 'DRAG THE BODY DOWN, LET GO TO JUMP';
-    if (h.hold === engine.problem.top) return 'MATCH THE TOP WITH BOTH HANDS';
-    if (!Crux.LIMBS[h.limb].hand) return 'STEP A FOOT UP. FEET SAVE YOUR GRIP';
-    return firstMove ? 'DRAG A HAND TO THE NEXT HOLD' : 'KEEP REACHING UP';
-  }
-
-  function hintPhase() {
-    return (hintClock % 1.6) / 1.6;
+    if (h.kind === 'chalk') return 'GRIP LOW! TAP CHALK';
+    if (h.hold === engine.problem.top) return 'GRAB THE TOP!';
+    if (grabs === 0) return MODE === 'tide' ? 'TAP THE HOLD TO GRAB IT' : 'TAP A HOLD TO CLIMB';
+    return 'TAP THE NEXT HOLD';
   }
 
   function drawHintWorld() {
-    if (hint.kind !== 'move' && hint.kind !== 'dyno') return;
-    const e = engine;
-    let fx, fy, tx, ty;
-    if (hint.kind === 'move') {
-      const s = e.limbs[hint.limb];
-      const h = e.holds[hint.hold];
-      fx = s.x; fy = s.y; tx = h.x; ty = h.y;
-    } else {
-      fx = e.body.px; fy = e.body.py; tx = fx; ty = fy + 70;
-    }
-    const t = hintPhase();
-    const k = t < 0.15 ? 0 : t > 0.75 ? 1 : (t - 0.15) / 0.6;
-    const ek = k * k * (3 - 2 * k);
-    const x = fx + (tx - fx) * ek, y = fy + (ty - fy) * ek;
-    ctx.setLineDash([5, 5]);
-    ctx.strokeStyle = INK.tape;
-    ctx.lineWidth = 2;
+    if (hint.kind !== 'move') return;
+    const h = engine.holds[hint.hold];
+    const s = engine.limbs[hint.limb];
+    ctx.setLineDash([4, 5]);
+    ctx.strokeStyle = 'rgba(200,104,63,0.7)';
+    ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.moveTo(fx, fy);
-    ctx.lineTo(tx, ty);
+    ctx.moveTo(s.x, s.y);
+    ctx.lineTo(h.x, h.y);
     ctx.stroke();
     ctx.setLineDash([]);
-    const pulse = 0.5 + 0.5 * Math.sin(clock * 7);
-    ctx.beginPath();
-    ctx.arc(tx, ty, 18 + pulse * 5, 0, Math.PI * 2);
-    ctx.strokeStyle = INK.tape;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    const alpha = t > 0.88 ? 1 - (t - 0.88) / 0.12 : 1;
-    ctx.globalAlpha = alpha;
-    drawFinger(x, y, t > 0.12 && t < 0.8);
-    ctx.globalAlpha = 1;
+    const t = (hintClock % 1.1) / 1.1;
+    const down = t > 0.35 && t < 0.6;
+    const lift = down ? 0 : Math.sin(Math.min(1, Math.abs(t - 0.47) * 3) * Math.PI / 2) * 14;
+    if (t > 0.45 && t < 0.95) {
+      const r = (t - 0.45) / 0.5;
+      ctx.globalAlpha = 1 - r;
+      ctx.strokeStyle = INK.tape;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, 10 + r * 26, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    drawFinger(h.x, h.y + lift, down);
   }
 
   function drawFinger(x, y, down) {
@@ -580,16 +796,54 @@
   function drawHintCaption() {
     const u = L.u;
     const label = hintCopy(hint);
-    const o = { size: 14 * u, weight: 700, spacing: 0.08, color: INK.paper };
-    const lines = wrap(label, L.wall.w - 56 * u, o);
-    const lh = 18 * u;
-    const w = Math.max(...lines.map((l) => measure(l, o))) + 24 * u;
+    const o = { size: 15 * u, weight: 700, spacing: 0.08, color: INK.paper };
+    const lines = wrap(label, L.wall.w - 70 * u, o);
+    const lh = 19 * u;
+    const w = Math.max(...lines.map((l) => measure(l, o))) + 26 * u;
     const h = lines.length * lh + 14 * u;
     const x = L.wall.x + (L.wall.w - w) / 2;
-    const y = L.wall.y + L.wall.h - h - 14 * u;
+    const y = L.wall.y + L.wall.h - h - 16 * u;
     rect(x, y, w, h, INK.navy);
     rect(x, y + h - 3 * u, w, 3 * u, INK.tape);
     lines.forEach((l, i) => text(l, x + w / 2, y + 7 * u + lh * (i + 0.75), Object.assign({ align: 'center' }, o)));
+  }
+
+  function addPopup(str, x, y, color, size) {
+    popups.push({ str, x, y, color, size, age: 0, life: 1.0 });
+  }
+
+  function drawPopupsWorld() {
+    for (const p of popups) {
+      const t = p.age / p.life;
+      const pop = t < 0.15 ? 0.6 + t / 0.15 * 0.6 : 1.2 - Math.min(0.2, (t - 0.15));
+      ctx.globalAlpha = t > 0.7 ? 1 - (t - 0.7) / 0.3 : 1;
+      text(p.str, p.x, p.y - t * 46, { size: p.size * pop, weight: 700, color: p.color, align: 'center', stroke: INK.paper, strokeWidth: p.size * 0.22, spacing: 0.04 });
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawMidCta() {
+    if (!midCta || state !== 'play') return;
+    const u = L.u;
+    const t = clock - midCta;
+    if (t > 4.5) {
+      midCta = null;
+      return;
+    }
+    const k = Math.min(1, t / 0.3, (4.5 - t) / 0.3);
+    const w = Math.min(L.wall.w - 70 * u, 300 * u), h = 44 * u;
+    const x = L.wall.x + (L.wall.w - w) / 2 - 10 * u;
+    const y = L.wall.y + 12 * u - (1 - k) * 60 * u;
+    rect(x, y, w, h, INK.paper, INK.navy, 1);
+    const icon = artReady('icon');
+    let tx = x + 10 * u;
+    if (icon) {
+      ctx.drawImage(icon, x + 6 * u, y + 6 * u, h - 12 * u, h - 12 * u);
+      tx = x + h;
+    }
+    text('LOVING IT?', tx, y + 18 * u, { size: 12 * u, weight: 700, spacing: 0.08, color: INK.tape });
+    text('40 more climbs in Crux', tx, y + 34 * u, { size: 12 * u, family: BODY, weight: 400, color: INK.sub });
+    button('cta-mid', x + w - 74 * u, y + 7 * u, 66 * u, h - 14 * u, 'PLAY', { fill: INK.navy, size: 13 * u }, openStore);
   }
 
   function gripMeter(x, y, w, label, grip) {
@@ -616,7 +870,7 @@
       ctx.strokeRect(x - g, y - g, w + g * 2, h + g * 2);
       ctx.globalAlpha = 1;
     }
-    const cx = x + w / 2, cy = y + h / 2 - 8 * u;
+    const cx = x + w / 2, cy = y + h / 2 - 7 * u;
     ctx.strokeStyle = INK.navy;
     ctx.lineWidth = 1.6 * u;
     ctx.beginPath();
@@ -630,7 +884,6 @@
     ctx.moveTo(cx - 10 * u, cy - 6 * u);
     ctx.lineTo(cx + 10 * u, cy - 6 * u);
     ctx.stroke();
-    ctx.fillStyle = INK.paper;
     for (const [dx, dy] of [[-3, -10], [2, -12], [5, -9]]) {
       ctx.beginPath();
       ctx.arc(cx + dx * u, cy + dy * u, 1.4 * u, 0, Math.PI * 2);
@@ -641,42 +894,13 @@
     buttons.push({ id: 'chalk', x, y, w, h, action: () => engine.chalkUp() });
   }
 
-  function dynoHint(x, y, w, h) {
+  function titleBlock(x, y) {
     const u = L.u;
-    ctx.setLineDash([4 * u, 3 * u]);
-    rect(x, y, w, h, null, INK.border, 1);
-    ctx.setLineDash([]);
-    const gx = x + 22 * u, gy = y + h / 2;
-    ctx.strokeStyle = INK.tape;
-    ctx.lineWidth = 2 * u;
-    ctx.beginPath();
-    ctx.moveTo(gx, gy + 11 * u);
-    ctx.lineTo(gx, gy - 11 * u);
-    ctx.moveTo(gx - 7 * u, gy - 4 * u);
-    ctx.lineTo(gx, gy - 11 * u);
-    ctx.lineTo(gx + 7 * u, gy - 4 * u);
-    ctx.stroke();
-    const tx = x + 42 * u;
-    text('DYNO', tx, y + h / 2 - 5 * u, { size: 14 * u, weight: 700, spacing: 0.08 });
-    const lines = wrap('Drag the body down, then release to jump.', w - 50 * u, { size: 11 * u, family: BODY, weight: 400 });
-    lines.slice(0, 2).forEach((l, i) => text(l, tx, y + h / 2 + 10 * u + i * 13 * u, { size: 11 * u, family: BODY, weight: 400, color: INK.sub }));
-  }
-
-  function legend(x, y, w) {
-    const u = L.u;
-    rect(x, y, w, 1, INK.divider);
-    const items = ['JUG SLOW', 'CRIMP FAST', 'SLOPER HIPS IN', 'PINCH MEDIUM'];
-    const cw = w / items.length;
-    items.forEach((t, i) => text(t, x + cw * i, y + 16 * u, { size: 10 * u, spacing: 0.06, color: INK.faint }));
-  }
-
-  function titleBlock(x, y, maxW) {
-    const u = L.u;
-    rect(x, y + 3 * u, 4 * u, 30 * u, ROUTE.tape);
+    rect(x, y + 3 * u, 4 * u, 30 * u, PROB.tape);
     const o = { size: 17 * u, weight: 700 };
-    text(ROUTE.name.toUpperCase(), x + 12 * u, y + 17 * u, o);
-    text(ROUTE.grade, x + 12 * u + measure(ROUTE.name.toUpperCase(), o) + 8 * u, y + 17 * u, { size: 17 * u, weight: 500, color: INK.faint });
-    const sub = `Attempt ${attempt} · Bonus ${engine.bonus ? 'taken' : 'open'}`;
+    text(PROB.name.toUpperCase(), x + 12 * u, y + 17 * u, o);
+    text(PROB.grade, x + 12 * u + measure(PROB.name.toUpperCase(), o) + 8 * u, y + 17 * u, { size: 17 * u, weight: 500, color: INK.faint });
+    const sub = MODE === 'tide' ? `Beat the tide · Attempt ${attempt}` : `Race vs ${RIVAL.name[0]}${RIVAL.name.slice(1).toLowerCase()} · Attempt ${attempt}`;
     text(sub, x + 12 * u, y + 33 * u, { size: 11 * u, family: BODY, weight: 400, color: INK.sub });
   }
 
@@ -689,7 +913,7 @@
     const topH = L.wall.y;
     rect(0, 0, W, topH, INK.paper);
     rect(0, topH - 1, W, 1, INK.frame);
-    titleBlock(12 * u, topH / 2 - 19 * u, W * 0.5);
+    titleBlock(12 * u, topH / 2 - 19 * u);
     const ctaW = 82 * u, ctaH = 34 * u;
     button('cta-top', W - ctaW - 12 * u, (topH - ctaH) / 2, ctaW, ctaH, 'PLAY', { fill: INK.navy, size: 14 * u }, openStore);
     text(heightLabel(), W - ctaW - 24 * u, topH / 2 + 4 * u, { size: 13 * u, spacing: 0.12, color: INK.accentDeep, align: 'right' });
@@ -698,14 +922,11 @@
     rect(p.x, p.y, p.w, p.h, INK.paper);
     rect(p.x, p.y, p.w, 1, INK.frame);
     const pad = 12 * u;
-    const cw = (W - pad * 2 - 10 * u) / 2;
-    gripMeter(pad, p.y + 10 * u, cw, 'LEFT HAND', engine.limbs[0].grip);
-    gripMeter(pad + cw + 10 * u, p.y + 10 * u, cw, 'RIGHT HAND', engine.limbs[1].grip);
-    const rowY = p.y + 48 * u, rowH = 62 * u;
-    const chalkW = 96 * u;
-    dynoHint(pad, rowY, W - pad * 2 - chalkW - 10 * u, rowH);
-    chalkButton(W - pad - chalkW, rowY, chalkW, rowH);
-    legend(pad, rowY + rowH + 10 * u, W - pad * 2);
+    const chalkW = 92 * u;
+    const mw = W - pad * 3 - chalkW;
+    gripMeter(pad, p.y + 10 * u, mw, 'LEFT HAND', engine.limbs[0].grip);
+    gripMeter(pad, p.y + 46 * u, mw, 'RIGHT HAND', engine.limbs[1].grip);
+    chalkButton(W - pad - chalkW, p.y + 10 * u, chalkW, p.h - 20 * u);
   }
 
   function drawLandscapeHud() {
@@ -716,7 +937,7 @@
     rect(rp.x, rp.y, rp.w, rp.h, INK.paper);
     rect(rp.x, 0, 1, H, INK.frame);
     const pad = 14 * u;
-    titleBlock(pad, pad, lp.w - pad * 2);
+    titleBlock(pad, pad);
     text('HEIGHT', pad, pad + 66 * u, { size: 11 * u, spacing: 0.14, color: INK.sub });
     text(heightLabel(), pad, pad + 96 * u, { size: 30 * u, weight: 700, color: INK.accentDeep });
     const mw = lp.w - pad * 2;
@@ -726,48 +947,58 @@
     chalkButton(pad, pad + 196 * u, mw, Math.max(44 * u, chalkH));
 
     const cx = rp.x + rp.w / 2;
-    let y = H * 0.2;
-    text('CRUX', cx, y + 40 * u, { size: 54 * u, weight: 700, align: 'center', spacing: 0.04 });
-    text('BOULDERING', cx, y + 62 * u, { size: 13 * u, spacing: 0.3, color: INK.tape, align: 'center' });
-    const pitch = wrap('40 problems across 5 crags. Tide, crumbling rock and night climbs.', rp.w - pad * 2, { size: 13 * u, family: BODY, weight: 400 });
-    pitch.forEach((l, i) => text(l, cx, y + 92 * u + i * 17 * u, { size: 13 * u, family: BODY, weight: 400, color: INK.sub, align: 'center' }));
+    const y = H * 0.12;
+    const icon = artReady('icon');
+    if (icon) ctx.drawImage(icon, cx - 32 * u, y, 64 * u, 64 * u);
+    text('CRUX', cx, y + 112 * u, { size: 46 * u, weight: 700, align: 'center', spacing: 0.04 });
+    text('BOULDERING', cx, y + 132 * u, { size: 13 * u, spacing: 0.3, color: INK.tape, align: 'center' });
+    const pitch = wrap(PITCH, rp.w - pad * 2, { size: 13 * u, family: BODY, weight: 400 });
+    pitch.forEach((l, i) => text(l, cx, y + 160 * u + i * 17 * u, { size: 13 * u, family: BODY, weight: 400, color: INK.sub, align: 'center' }));
     const bw = rp.w - pad * 2, bh = 48 * u;
     button('cta-side', rp.x + pad, H - pad - bh, bw, bh, 'PLAY FREE', { fill: INK.navy, size: 16 * u, pulse: true }, openStore);
   }
 
   function prepareEndCard() {
     const e = engine;
-    const sent = e.phase === 'SENT';
-    const higher = !sent && e.high > bestHigh + 30 && attempt > 1;
+    const won = MODE === 'race' ? e.phase === 'SENT' && !rival.sent : e.phase === 'SENT';
+    const higher = !won && e.high > bestHigh + 30 && attempt > 1;
     bestHigh = Math.max(bestHigh, e.high);
-    let headline, line;
-    if (sent) {
-      headline = 'SENT';
-      if (attempt === 1) line = 'Flashed. You read it right the first time.';
-      else if (attempt === 2) line = 'Second try. That foot change was the answer.';
-      else line = `Attempt ${attempt}. Clean and steady.`;
+    let headline, line, stats;
+    const height = `${(e.high / 100).toFixed(1)} m`;
+    if (MODE === 'tide') {
+      const gapCm = Math.max(1, Math.round(closest));
+      stats = [['TIME', fmtTime(e.time)], ['HEIGHT', height], ['CLOSEST', `${gapCm} cm`]];
+      if (won) {
+        headline = 'SAVED!';
+        line = gapCm < 50 ? `The sea was ${gapCm} cm from your feet. Out in ${fmtTime(e.time)}.` : `You beat the tide in ${fmtTime(e.time)}.`;
+      } else {
+        headline = 'SPLASH!';
+        const lead = higher ? 'Higher than last time. ' : '';
+        line = lead + (e.cause === 'TIDE' ? 'The water caught you. Keep tapping, the next hold is closer than it looks.' : 'Your grip gave out. Keep moving and rest on the big holds.');
+      }
     } else {
-      headline = `FELL AT ${(e.high / 100).toFixed(1)} M`;
-      const lead = higher ? 'Higher than last time. ' : '';
-      const held = e.failX || e.failY ? e.holds.find((h) => h.x === e.failX && h.y === e.failY) : null;
-      const kind = held ? Crux.KINDS[held.kind].label.toLowerCase() : 'jug';
-      let body;
-      if (e.cause === 'LEFT_HAND' || e.cause === 'RIGHT_HAND') body = `Get a foot under the ${kind} before you move.`;
-      else if (e.cause === 'MISSED_DYNO') body = 'Pull the body lower before you jump. More power, less angle.';
-      else body = 'Take a breath. Feet first, then reach.';
-      line = lead + body;
+      const r = rival.engine;
+      stats = [['YOU', height], [RIVAL.name, `${(r.high / 100).toFixed(1)} m`], ['TIME', fmtTime(e.time)]];
+      if (won) {
+        headline = 'YOU WON!';
+        const behind = Math.max(0.1, (PROB.ground - PROB.holds[PROB.top].y - r.high) / 100);
+        line = `${RIVAL.name[0]}${RIVAL.name.slice(1).toLowerCase()} was still ${behind.toFixed(1)} m below the top.`;
+      } else {
+        headline = `${RIVAL.name} WON`;
+        line = e.phase === 'FELL' ? 'You came off the wall. Rematch?' : `${RIVAL.name[0]}${RIVAL.name.slice(1).toLowerCase()} topped out first. You were at ${height}. Rematch?`;
+      }
     }
-    endCard = {
-      sent,
-      headline,
-      line,
-      time: e.time,
-      height: e.high / 100,
-      bonus: e.bonus,
-      cause: e.cause ? Crux.FALL_LINES[e.cause] : null,
-      at: clock
-    };
-    document.body.dataset.phase = sent ? 'sent' : 'fell';
+    endCard = { won, headline, line, stats, at: clock };
+    document.body.dataset.phase = won ? 'sent' : 'fell';
+  }
+
+  function drawLock(x, y, s, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.8 * s;
+    ctx.beginPath();
+    ctx.arc(x, y - 3 * s, 4.5 * s, Math.PI, 0);
+    ctx.stroke();
+    rect(x - 7 * s, y - 3 * s, 14 * s, 11 * s, color);
   }
 
   function drawEndCard() {
@@ -781,44 +1012,63 @@
     const inner = cw - pad * 2;
     const lineO = { size: 14 * u, family: BODY, weight: 400 };
     const lines = wrap(c.line, inner, lineO);
-    const pitchO = { size: 13 * u, family: BODY, weight: 400 };
-    const pitch = wrap('40 problems across 5 crags. Tide, crumbling rock and night climbs.', inner, pitchO);
+    const slot = c.won ? 'hero' : 'fail';
+    const hero = artReady(`${slot}_${MODE}`) || artReady(slot) || artReady(`hero_${MODE}`);
+    const heroH = hero ? Math.min(140 * u, inner * hero.naturalHeight / hero.naturalWidth) : 0;
     const headSize = Math.min(52 * u, inner / Math.max(4, c.headline.length) * 1.9);
-    const ch = pad + 18 * u + headSize + 8 * u + lines.length * 19 * u + 18 * u + 58 * u + 14 * u + pitch.length * 17 * u + 18 * u + 50 * u + 10 * u + 44 * u + pad;
+    const ch = pad + 40 * u + (heroH ? heroH + 12 * u : 0) + headSize + 8 * u + lines.length * 19 * u + 16 * u + 58 * u + 12 * u + 30 * u + 14 * u + 50 * u + 10 * u + 44 * u + pad;
     const cx = (W - cw) / 2;
     const cy = Math.max(12 * u, (H - ch) / 2) + (1 - t) * 30 * u;
     ctx.globalAlpha = t;
     rect(cx, cy, cw, ch, INK.paper, INK.navy, 1);
     cornerTicks(cx, cy, cw, ch, 5 * u, 9 * u, INK.navy);
-    let y = cy + pad + 12 * u;
-    text(`${ROUTE.name.toUpperCase()} · ${ROUTE.grade}`, cx + pad, y, { size: 12 * u, weight: 600, spacing: 0.14, color: INK.tape });
-    y += 6 * u + headSize;
-    text(c.headline, cx + pad, y, { size: headSize, weight: 700, color: c.sent ? INK.text : INK.navy });
+    let y = cy + pad;
+    const icon = artReady('icon');
+    let bx = cx + pad;
+    if (icon) {
+      ctx.drawImage(icon, bx, y, 32 * u, 32 * u);
+      bx += 40 * u;
+    }
+    text('CRUX', bx, y + 15 * u, { size: 17 * u, weight: 700, spacing: 0.06 });
+    text(`${PROB.name.toUpperCase()} · ${PROB.grade}`, bx, y + 30 * u, { size: 11 * u, weight: 600, spacing: 0.14, color: INK.tape });
+    y += 40 * u;
+    if (hero) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(cx + pad, y, inner, heroH);
+      ctx.clip();
+      const scale = Math.max(inner / hero.naturalWidth, heroH / hero.naturalHeight);
+      const iw = hero.naturalWidth * scale, ih = hero.naturalHeight * scale;
+      ctx.drawImage(hero, cx + pad + (inner - iw) / 2, y + (heroH - ih) / 2, iw, ih);
+      ctx.restore();
+      rect(cx + pad, y, inner, heroH, null, INK.frame, 1);
+      y += heroH + 12 * u;
+    }
+    y += headSize;
+    text(c.headline, cx + pad, y, { size: headSize, weight: 700, color: c.won ? INK.tape : INK.navy });
     y += 8 * u;
     lines.forEach((l) => {
       y += 19 * u;
       text(l, cx + pad, y - 4 * u, Object.assign({ color: INK.body }, lineO));
     });
-    y += 14 * u;
+    y += 12 * u;
     rect(cx + pad, y, inner, 1, INK.divider);
-    const stats = [['TIME', fmtTime(c.time)], ['HEIGHT', `${c.height.toFixed(1)} m`], ['BONUS', c.bonus ? 'Taken' : 'Open']];
     const sw = inner / 3;
-    stats.forEach(([k, v], i) => {
+    c.stats.forEach(([k, v], i) => {
       text(k, cx + pad + sw * i, y + 20 * u, { size: 11 * u, spacing: 0.14, color: INK.sub });
-      text(v, cx + pad + sw * i, y + 44 * u, { size: 22 * u, weight: 700, color: k === 'BONUS' && c.bonus ? INK.tape : INK.text });
+      text(v, cx + pad + sw * i, y + 44 * u, { size: 22 * u, weight: 700, color: INK.text });
     });
     y += 58 * u;
     rect(cx + pad, y, inner, 1, INK.divider);
-    y += 14 * u;
-    pitch.forEach((l) => {
-      y += 17 * u;
-      text(l, cx + pad, y - 4 * u, Object.assign({ color: INK.sub }, pitchO));
-    });
-    y += 18 * u;
-    const primaryCta = c.sent || attempt >= 2;
-    const retryLabel = c.sent ? 'CLIMB AGAIN' : 'TRY AGAIN';
+    y += 12 * u;
+    rect(cx + pad, y, inner, 30 * u, '#E7EBEF');
+    drawLock(cx + pad + 16 * u, y + 14 * u, u, INK.navy);
+    text('NEXT CRAG: NIGHT BOULDERS', cx + pad + 32 * u, y + 19.5 * u, { size: 12 * u, weight: 700, spacing: 0.1, color: INK.navy });
+    y += 30 * u + 14 * u;
+    const primaryCta = c.won || attempt >= 2;
+    const retryLabel = c.won ? (MODE === 'race' ? 'RACE AGAIN' : 'CLIMB AGAIN') : (MODE === 'race' ? 'REMATCH' : 'TRY AGAIN');
     if (primaryCta) {
-      button('cta-end', cx + pad, y, inner, 50 * u, c.sent ? 'PLAY CRUX FREE' : 'GET CRUX, TRAIN HARDER', { fill: INK.navy, size: 16 * u, pulse: true }, openStore);
+      button('cta-end', cx + pad, y, inner, 50 * u, c.won ? 'PLAY CRUX FREE' : 'GET CRUX, TRAIN HARDER', { fill: INK.navy, size: 16 * u, pulse: true }, openStore);
       button('retry', cx + pad, y + 60 * u, inner, 44 * u, retryLabel, { border: INK.sub, size: 14 * u }, retry);
     } else {
       button('retry', cx + pad, y, inner, 50 * u, retryLabel, { fill: INK.navy, size: 16 * u, pulse: true }, retry);
@@ -885,23 +1135,65 @@
     BONUS: ['bonus', 1, 25],
     SENT: ['sent', 1, [30, 40, 30, 40, 80]],
     FALL: ['fall', 1, [40, 30, 60]],
-    LANDED: ['land', 1, 50]
+    LANDED: [MODE === 'tide' ? 'tide' : 'land', 1, 50],
+    TIDE: ['tide', 0.7, 30]
   };
 
   function handleCues() {
     for (const cue of engine.drainCues()) {
       const fx = CUE_SFX[cue];
-      if (!fx) continue;
-      play(fx[0], fx[1]);
-      vibrate(fx[2]);
-      if (cue === 'GRAB_HAND' || cue === 'GRAB_FOOT') {
-        firstMove = cue === 'GRAB_HAND' ? false : firstMove;
+      if (fx) {
+        play(fx[0], fx[1]);
+        vibrate(fx[2]);
       }
+      if (cue === 'GRAB_HAND') onHandGrab();
       if (cue === 'BONUS') {
         const b = engine.holds[engine.problem.bonus];
         flashes.push({ x: b.x, y: b.y, age: 0, life: 0.7, color: INK.tape });
+        addPopup('BONUS!', b.x, b.y - 26, INK.tape, 26);
+        shake = Math.max(shake, 0.35);
+        if (!midCtaShown) {
+          midCta = clock + 0.6;
+          midCtaShown = true;
+        }
       }
-      if (cue === 'SENT') spawnConfetti();
+      if (cue === 'SENT') {
+        spawnConfetti();
+        shake = Math.max(shake, 0.4);
+      }
+      if (cue === 'FALL') shake = Math.max(shake, 0.5);
+    }
+  }
+
+  function onHandGrab() {
+    grabs++;
+    combo = clock - lastGrab < 1.3 ? combo + 1 : 1;
+    lastGrab = clock;
+    const e = engine;
+    const words = { 3: 'NICE!', 4: 'GREAT!', 5: 'AWESOME!' };
+    if (combo >= 3) {
+      const word = combo >= 6 ? 'ON FIRE!' : words[combo];
+      addPopup(`${word} x${combo}`, e.headX, e.headY - 40, combo >= 5 ? INK.tape : INK.accentDeep, 22 + Math.min(combo, 6));
+      shake = Math.max(shake, 0.12);
+    }
+  }
+
+  function trackProgress() {
+    const e = engine;
+    const m = Math.floor(e.high / 100);
+    if (m > meterMark && e.phase === 'CLIMB') {
+      meterMark = m;
+      addPopup(`${m} M`, e.headX + 34, e.headY, INK.navy, 18);
+    }
+    if (MODE !== 'tide' || e.phase !== 'CLIMB' || !e.tideRunning) return;
+    const gap = e.tideGap;
+    closest = Math.min(closest, Math.max(0, gap - 40));
+    if (gap < 48) danger = true;
+    if (danger && gap > 115) {
+      danger = false;
+      addPopup('CLOSE ONE!', e.headX, e.headY - 44, INK.tape, 26);
+      shake = Math.max(shake, 0.3);
+      vibrate(25);
     }
   }
 
@@ -1052,7 +1344,7 @@
 
   function tapGrab(wx, wy) {
     const e = engine;
-    let best = -1, bestD = 36;
+    let best = -1, bestD = 44;
     e.holds.forEach((h, i) => {
       const d = Math.hypot(h.x - wx, h.y - wy);
       if (d < bestD) {
@@ -1063,12 +1355,13 @@
     if (best < 0) return;
     const h = e.holds[best];
     const valid = (id) => e.limbs[id].hold !== best && e.canGrab(id, best) && e.inReach(id, best);
-    const hands = [Crux.LH, Crux.RH].filter(valid).sort((a, b) => e.limbs[b].y - e.limbs[a].y || Math.abs(e.limbs[a].x - h.x) - Math.abs(e.limbs[b].x - h.x));
+    const hands = [Crux.LH, Crux.RH].filter(valid).sort((a, b) => (e.limbs[a].hold === null ? -1 : 0) - (e.limbs[b].hold === null ? -1 : 0) || e.limbs[b].y - e.limbs[a].y);
     const feet = [Crux.LF, Crux.RF].filter(valid).sort((a, b) => e.limbs[b].y - e.limbs[a].y);
     const preferFeet = h.y > e.body.py - 10;
     const pick = preferFeet ? (feet[0] ?? hands[0]) : (hands[0] ?? feet[0]);
     if (pick === undefined) {
       flashes.push({ x: h.x, y: h.y, age: 0, life: 0.5, color: INK.border });
+      addPopup('TOO FAR', h.x, h.y - 20, INK.faint, 14);
       return;
     }
     e.pressLimb(pick);
@@ -1078,6 +1371,12 @@
 
   function point(ev) {
     return { x: ev.clientX, y: ev.clientY };
+  }
+
+  function firstTouch() {
+    if (touched) return;
+    touched = true;
+    if (engine) engine.tideRunning = true;
   }
 
   canvas.addEventListener('pointerdown', (ev) => {
@@ -1091,6 +1390,7 @@
       return;
     }
     if (state !== 'play' || !inWall(p) || activePointer !== null) return;
+    firstTouch();
     activePointer = ev.pointerId;
     try {
       canvas.setPointerCapture(ev.pointerId);
@@ -1139,18 +1439,13 @@
       return;
     }
     const pumped = e.chalk > 0 && e.hands().some((s) => s.hold !== null && s.grip < 0.3);
-    if (pumped) {
-      if (!hint || hint.kind !== 'chalk') hintClock = 0;
-      hint = { kind: 'chalk' };
-      return;
-    }
-    const wait = firstMove ? 0.5 : 3.2;
-    if (idle < wait) {
+    const wait = grabs === 0 ? (MODE === 'tide' ? 0.9 : 1.6) : 1.8;
+    if (!pumped && idle < wait) {
       hint = null;
       return;
     }
-    if (!hint || hintRefresh <= 0) {
-      const next = assist.spotter.decide(false);
+    if (!hint || hintRefresh <= 0 || (pumped && hint.kind !== 'chalk')) {
+      const next = handHint();
       if (!hint || !next || next.kind !== hint.kind || next.limb !== hint.limb || next.hold !== hint.hold) hintClock = 0;
       hint = next;
       hintRefresh = 0.4;
@@ -1159,8 +1454,11 @@
 
   function update(dt) {
     clock += dt;
+    shake = Math.max(0, shake - dt * 1.6);
     if (state === 'play') {
+      playClock += dt;
       idle += dt;
+      if (MODE === 'tide' && !engine.tideRunning && playClock > TIDE_AUTOSTART) engine.tideRunning = true;
       if (spotter) spotter.update(dt);
       const assisted = assist.update(dt);
       if (assisted) {
@@ -1168,11 +1466,14 @@
         flashes.push({ x: h.x, y: h.y, age: 0, life: 0.6, color: INK.accent });
       }
       engine.step(dt);
+      if (rival && playClock > 1.5) rival.update(dt, engine);
       handleCues();
+      trackProgress();
       updateHint(dt);
-      if (engine.over) {
+      const raceLost = rival && rival.sent && engine.phase !== 'SENT';
+      if (engine.over || raceLost) {
         endTimer += dt;
-        if (endTimer > (engine.phase === 'SENT' ? 1.1 : 0.5)) {
+        if (endTimer > (engine.phase === 'SENT' ? 1.1 : raceLost ? 0.6 : 0.5)) {
           prepareEndCard();
           state = 'end';
           setMusicLevel(MUSIC_DUCK, 0.6);
@@ -1180,10 +1481,13 @@
       }
     } else {
       engine.step(dt);
+      if (rival) rival.update(dt, engine);
       handleCues();
-      if (demo && clock - endCard.at > 2.5 && !endCard.sent) retry();
+      if (demo && clock - endCard.at > 2.5 && !endCard.won) retry();
     }
+    if (MODE === 'tide' && engine.phase === 'SENT' && isFinite(engine.tideY)) engine.tideY += 90 * dt;
     flashes = flashes.filter((f) => (f.age += dt) < f.life);
+    popups = popups.filter((p) => (p.age += dt) < p.life);
   }
 
   function render(dt) {

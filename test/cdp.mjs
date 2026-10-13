@@ -38,7 +38,7 @@ for (let t = 0; t < total; t += 1) {
   const r = await send('Runtime.evaluate', { expression: 'document.body ? document.body.dataset.phase : "none"', returnByValue: true });
   const p = r.result.value;
   if (phases[phases.length - 1]?.[1] !== p) phases.push([t + 1, p]);
-  if (p === 'sent') break;
+  if (p === 'sent' || (hash === '' && p === 'fell')) break;
 }
 const fonts = await send('Runtime.evaluate', { expression: '[...document.fonts].map(f => f.family + " " + f.weight + " " + f.status).join(", ")', returnByValue: true });
 console.log('phases', JSON.stringify(phases));

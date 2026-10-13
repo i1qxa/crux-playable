@@ -30,7 +30,8 @@ jobs:
         run: |
           mkdir site
           cp dist/*.html site/
-          cp dist/crux-playable-meta.html site/index.html
+          cp dist/crux-tide-meta.html site/index.html
+          cp dist/crux-race-meta.html site/race.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

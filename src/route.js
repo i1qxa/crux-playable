@@ -1,8 +1,4 @@
-const ROUTE = Crux.problem({
-  name: 'Blue Tape',
-  grade: 'V3',
-  tape: '#5980A6',
-  holds: [
+const HOLDS = [
     [118, 1400, 'JUG'],
     [238, 1392, 'JUG'],
     [126, 1500, 'JUG'],
@@ -31,9 +27,33 @@ const ROUTE = Crux.problem({
     [150, 1172, 'PINCH'],
     [160, 1080, 'CRIMP'],
     [150, 988, 'PINCH']
-  ],
+];
+
+const ROUTE = Crux.problem({
+  name: 'Blue Tape',
+  grade: 'V3',
+  tape: '#5980A6',
+  holds: HOLDS,
   start: [0, 1, 2, 3],
   bonus: 15,
   top: 21
 });
+
+const TIDE_ROUTE = Crux.problem({
+  name: 'Salt Spray',
+  grade: 'V3',
+  tape: '#C8683F',
+  holds: HOLDS,
+  start: [0, null, null, null],
+  bonus: 15,
+  top: 21
+});
+
 const KIT = { pump: 1 };
+
+const TIDE_KIT = {
+  pump: 1,
+  tide: { start: 1548, rate: 15, near: 22, cruise: 150, min: 0.1, max: 2.6 }
+};
+
+const RIVAL = { name: 'MAX', base: 0.95, ahead: 2.1, behind: 0.55, finish: 3.2 };

@@ -15,15 +15,14 @@ FONTS = {
     "__FONT_COND_700__": "barlow_condensed_700.ttf",
 }
 
-VARIANTS = {
-    "crux-playable-mraid.html": '<script src="mraid.js"></script>',
-    "crux-playable-meta.html": "",
+MODES = ("tide", "race")
+
+NETWORKS = {
+    "mraid": ('<script src="mraid.js"></script>', 5 * 1024 * 1024),
+    "meta": ("", 2 * 1024 * 1024),
 }
 
-LIMITS = {
-    "crux-playable-mraid.html": 5 * 1024 * 1024,
-    "crux-playable-meta.html": 2 * 1024 * 1024,
-}
+ART_TYPES = {".png": "image/png", ".webp": "image/webp", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
 def b64(path):
@@ -31,24 +30,29 @@ def b64(path):
 
 
 def main():
-    script = "\n".join((SRC / name).read_text(encoding="utf-8") for name in ("engine.js", "route.js", "assist.js", "game.js"))
+    script = "\n".join((SRC / name).read_text(encoding="utf-8") for name in ("engine.js", "route.js", "assist.js", "race.js", "game.js"))
     sfx = {p.stem: b64(p) for p in sorted((ASSETS / "sfx").glob("*.wav"))}
     page = (SRC / "template.html").read_text(encoding="utf-8")
     for token, name in FONTS.items():
         page = page.replace(token, b64(ASSETS / "fonts" / name))
     music = json.loads((ASSETS / "music" / "loop.json").read_text(encoding="utf-8"))
     music["data"] = b64(ASSETS / "music" / "loop.mp3")
-    page = page.replace("__SFX__", json.dumps(sfx)).replace("__MUSIC__", json.dumps(music)).replace("__SCRIPT__", script)
+    art = {p.stem: f"data:{ART_TYPES[p.suffix.lower()]};base64,{b64(p)}" for p in sorted((ASSETS / "art").iterdir()) if p.suffix.lower() in ART_TYPES}
+    page = page.replace("__SFX__", json.dumps(sfx)).replace("__MUSIC__", json.dumps(music)).replace("__ART__", json.dumps(art)).replace("__SCRIPT__", script)
+    print("art:", ", ".join(sorted(art)) or "none")
     DIST.mkdir(exist_ok=True)
+    for old in DIST.glob("*.html"):
+        old.unlink()
     ok = True
-    for name, mraid in VARIANTS.items():
-        out = DIST / name
-        out.write_text(page.replace("__MRAID__", mraid), encoding="utf-8")
-        size = out.stat().st_size
-        limit = LIMITS.get(name)
-        flag = "" if limit is None else (" ok" if size <= limit else f" OVER {limit // 1024} KB")
-        ok = ok and (limit is None or size <= limit)
-        print(f"{name:32} {size / 1024:8.1f} KB{flag}")
+    for mode in MODES:
+        for network, (mraid, limit) in NETWORKS.items():
+            name = f"crux-{mode}-{network}.html"
+            out = DIST / name
+            out.write_text(page.replace("__MRAID__", mraid).replace("__MODE__", mode), encoding="utf-8")
+            size = out.stat().st_size
+            fits = size <= limit
+            ok = ok and fits
+            print(f"{name:28} {size / 1024:8.1f} KB {'ok' if fits else f'OVER {limit // 1024} KB'}")
     return 0 if ok else 1
 
 

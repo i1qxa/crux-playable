@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const [file, W = 390, H = 844] = process.argv.slice(2).map((v, i) => (i ? Number(v) : v));
+const [file, W = 390, H = 844, hashArg = ''] = process.argv.slice(2).map((v, i) => (i === 1 || i === 2 ? Number(v) : v));
 const profile = mkdtempSync(join(process.env.SCRATCH || tmpdir(), 'cdp-'));
 const port = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn('google-chrome', ['--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, `--window-size=${W},${H}`, 'about:blank'], { stdio: 'ignore' });
@@ -31,10 +31,16 @@ await send('Page.addScriptToEvaluateOnNewDocument', { source: `
   window.__opened = [];
   window.mraid = { getState: () => 'default', isViewable: () => true, addEventListener: () => {}, open: (u) => window.__opened.push(u) };
 ` });
-await send('Page.navigate', { url: `file://${file}` });
+await send('Page.navigate', { url: `file://${file}${hashArg}` });
 await sleep(1500);
-await ev(`(() => { const o = Crux.Engine.prototype.step; Crux.Engine.prototype.step = function (dt) { window.__e = this; return o.call(this, dt); }; })()`);
+await ev(`(() => {
+  const u = Crux.Spotter.prototype.update;
+  Crux.Spotter.prototype.update = function (dt) { this.e.__rival = true; return u.call(this, dt); };
+  const o = Crux.Engine.prototype.step;
+  Crux.Engine.prototype.step = function (dt) { if (!this.__rival) window.__e = this; return o.call(this, dt); };
+})()`);
 await sleep(300);
+await ev(`(() => { window.__log = []; const c = document.getElementById('game'); for (const t of ['pointerdown', 'pointerup', 'pointercancel', 'lostpointercapture']) c.addEventListener(t, (e) => window.__log.push(t + ':' + e.pointerId + ':' + Math.round(e.clientY))); })()`);
 
 const L = await ev(`(() => {
   const W = innerWidth, H = innerHeight, portrait = H >= W * 1.1;
@@ -51,6 +57,9 @@ const scr = async (x, y) => {
 const mouse = (type, p) => send('Input.dispatchMouseEvent', { type, x: p.x, y: p.y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });
 async function drag(from, to) {
   await mouse('mousePressed', from);
+  await sleep(30);
+  if (process.env.TRACE) console.log('  events', await ev('window.__log.join(" ")'));
+  if (process.env.TRACE) console.log('  after press: drag=', await ev('JSON.stringify(window.__e.drag)'), 'aim=', await ev('!!window.__e.aim'), 'limbs=', await ev('JSON.stringify(window.__e.limbs.map(l => [Math.round(l.x), Math.round(l.y)]))'));
   for (let i = 1; i <= 8; i++) {
     await mouse('mouseMoved', { x: from.x + (to.x - from.x) * i / 8, y: from.y + (to.y - from.y) * i / 8 });
     await sleep(16);
@@ -61,13 +70,28 @@ async function drag(from, to) {
 const limbHolds = () => ev('window.__e.limbs.map(l => l.hold).join(",")');
 
 console.log('start', await limbHolds());
-const rh = await ev('[window.__e.limbs[1].x, window.__e.limbs[1].y]');
-await drag(await scr(rh[0], rh[1]), await scr(250, 1338));
-console.log('after drag RH -> 5', await limbHolds());
-
-const tapP = await scr(100, 1344);
-await mouse('mousePressed', tapP); await sleep(40); await mouse('mouseReleased', tapP); await sleep(150);
-console.log('after tap hold 4', await limbHolds());
+const pickTarget = (limb, loose) => ev(`(() => { const s = new Crux.Spotter(window.__e); return s.bestHand(${limb}, ${loose}); })()`);
+const free = await ev('window.__e.limbs[1].hold === null');
+let tapTarget = await pickTarget(1, free);
+if (tapTarget !== null) {
+  const h = await ev(`[window.__e.holds[${tapTarget}].x, window.__e.holds[${tapTarget}].y]`);
+  const tp = await scr(h[0], h[1]);
+  await mouse('mousePressed', tp); await sleep(40); await mouse('mouseReleased', tp); await sleep(200);
+  console.log(`tap hold ${tapTarget}:`, await limbHolds());
+}
+await sleep(1200);
+const upper = await ev('window.__e.limbs[0].y <= window.__e.limbs[1].y ? 0 : 1');
+const upperHold = await ev(`window.__e.limbs[${upper}].hold`);
+const dragTarget = await pickTarget(upper, false);
+if (dragTarget !== null) {
+  const from = await ev(`[window.__e.limbs[${upper}].x, window.__e.limbs[${upper}].y]`);
+  const h = await ev(`[window.__e.holds[${dragTarget}].x, window.__e.holds[${dragTarget}].y]`);
+  const a = await scr(from[0], from[1]);
+  const b = await scr(h[0], h[1]);
+  await drag(a, b);
+  console.log(`drag ${upper ? 'RH' : 'LH'} ${upperHold} -> ${dragTarget} (screen y ${Math.round(a.y)} -> ${Math.round(b.y)}):`, await limbHolds());
+}
+console.log('tide running', await ev('window.__e.tideRunning'), 'tideY', await ev('Math.round(window.__e.tideY)'));
 
 if (L.portrait) {
   const ctaX = L.W - 12 * L.u - 41 * L.u, ctaY = 28 * L.u;
