@@ -30,7 +30,7 @@ ws.addEventListener('message', (ev) => {
 const send = (method, params = {}) => new Promise((r) => { const n = ++id; pending.set(n, r); ws.send(JSON.stringify({ id: n, method, params })); });
 await send('Runtime.enable');
 await send('Page.enable');
-await send('Page.navigate', { url: `file://${file}${hash}` });
+await send('Page.navigate', { url: (file.startsWith('http') ? file : `file://${file}`) + hash });
 const phases = [];
 const total = Number(seconds);
 for (let t = 0; t < total; t += 1) {
