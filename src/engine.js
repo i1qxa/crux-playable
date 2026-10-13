@@ -532,7 +532,7 @@ const Crux = (() => {
       }
       const lh = this.limbs[LH].hold;
       const rh = this.limbs[RH].hold;
-      if (lh === this.problem.top && rh === this.problem.top) {
+      if (lh === this.problem.top || rh === this.problem.top) {
         this.phase = 'SENT';
         this.drag = null;
         this.aim = null;
