@@ -38,17 +38,19 @@ def main():
     music = json.loads((ASSETS / "music" / "loop.json").read_text(encoding="utf-8"))
     music["data"] = b64(ASSETS / "music" / "loop.mp3")
     art = {p.stem: f"data:{ART_TYPES[p.suffix.lower()]};base64,{b64(p)}" for p in sorted((ASSETS / "art").iterdir()) if p.suffix.lower() in ART_TYPES}
-    page = page.replace("__SFX__", json.dumps(sfx)).replace("__MUSIC__", json.dumps(music)).replace("__ART__", json.dumps(art)).replace("__SCRIPT__", script)
-    print("art:", ", ".join(sorted(art)) or "none")
+    page = page.replace("__SFX__", json.dumps(sfx)).replace("__MUSIC__", json.dumps(music)).replace("__SCRIPT__", script)
     DIST.mkdir(exist_ok=True)
     for old in DIST.glob("*.html"):
         old.unlink()
     ok = True
     for mode in MODES:
+        picked = {k: v for k, v in art.items() if "_" not in k or k.endswith("_" + mode)}
+        print(f"{mode} art:", ", ".join(sorted(picked)) or "none")
+        moded = page.replace("__ART__", json.dumps(picked))
         for network, (mraid, limit) in NETWORKS.items():
             name = f"crux-{mode}-{network}.html"
             out = DIST / name
-            out.write_text(page.replace("__MRAID__", mraid).replace("__MODE__", mode), encoding="utf-8")
+            out.write_text(moded.replace("__MRAID__", mraid).replace("__MODE__", mode), encoding="utf-8")
             size = out.stat().st_size
             fits = size <= limit
             ok = ok and fits

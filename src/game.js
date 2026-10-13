@@ -1014,9 +1014,12 @@
     const lines = wrap(c.line, inner, lineO);
     const slot = c.won ? 'hero' : 'fail';
     const hero = artReady(`${slot}_${MODE}`) || artReady(slot) || artReady(`hero_${MODE}`);
-    const heroH = hero ? Math.min(140 * u, inner * hero.naturalHeight / hero.naturalWidth) : 0;
     const headSize = Math.min(52 * u, inner / Math.max(4, c.headline.length) * 1.9);
-    const ch = pad + 40 * u + (heroH ? heroH + 12 * u : 0) + headSize + 8 * u + lines.length * 19 * u + 16 * u + 58 * u + 12 * u + 30 * u + 14 * u + 50 * u + 10 * u + 44 * u + pad;
+    const base = pad + 40 * u + headSize + 8 * u + lines.length * 19 * u + 16 * u + 58 * u + 12 * u + 30 * u + 14 * u + 50 * u + 10 * u + 44 * u + pad;
+    const room = H - 24 * u - base - 12 * u;
+    let heroH = hero ? Math.min(140 * u, inner * hero.naturalHeight / hero.naturalWidth, room) : 0;
+    if (heroH < 56 * u) heroH = 0;
+    const ch = base + (heroH ? heroH + 12 * u : 0);
     const cx = (W - cw) / 2;
     const cy = Math.max(12 * u, (H - ch) / 2) + (1 - t) * 30 * u;
     ctx.globalAlpha = t;
@@ -1032,7 +1035,7 @@
     text('CRUX', bx, y + 15 * u, { size: 17 * u, weight: 700, spacing: 0.06 });
     text(`${PROB.name.toUpperCase()} · ${PROB.grade}`, bx, y + 30 * u, { size: 11 * u, weight: 600, spacing: 0.14, color: INK.tape });
     y += 40 * u;
-    if (hero) {
+    if (heroH) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(cx + pad, y, inner, heroH);
