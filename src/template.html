@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="ad.orientation" content="portrait,landscape">
+<title>Crux</title>
+__MRAID__
+<style>
+@font-face { font-family: "Barlow"; font-weight: 400; src: url(data:font/ttf;base64,__FONT_BARLOW_400__) format("truetype"); }
+@font-face { font-family: "Barlow Condensed"; font-weight: 500; src: url(data:font/ttf;base64,__FONT_COND_500__) format("truetype"); }
+@font-face { font-family: "Barlow Condensed"; font-weight: 600; src: url(data:font/ttf;base64,__FONT_COND_600__) format("truetype"); }
+@font-face { font-family: "Barlow Condensed"; font-weight: 700; src: url(data:font/ttf;base64,__FONT_COND_700__) format("truetype"); }
+html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #F2F2F3; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+canvas { display: block; touch-action: none; }
+.preload { position: absolute; left: -999px; top: -999px; visibility: hidden; }
+.preload span:nth-child(1) { font: 400 10px "Barlow"; }
+.preload span:nth-child(2) { font: 500 10px "Barlow Condensed"; }
+.preload span:nth-child(3) { font: 600 10px "Barlow Condensed"; }
+.preload span:nth-child(4) { font: 700 10px "Barlow Condensed"; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="preload"><span>a</span><span>a</span><span>a</span><span>a</span></div>
+<script id="sfx" type="application/json">__SFX__</script>
+<script id="music" type="application/json">__MUSIC__</script>
+<script>
+__SCRIPT__
+</script>
+</body>
+</html>
